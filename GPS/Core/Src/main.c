@@ -6,7 +6,7 @@
   ******************************************************************************
   * @attention
   *
-  * Copyright (c) 2025 STMicroelectronics.
+  * Copyright (c) 2022 STMicroelectronics.
   * All rights reserved.
   *
   * This software is licensed under terms that can be found in the LICENSE file
@@ -21,6 +21,13 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <math.h>
+#include "fonts.h"
+#include "ssd1306.h"
+#include "gps_data_types.h"
 
 /* USER CODE END Includes */
 
@@ -31,7 +38,8 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+#define Min_To_Degree  0.01666666667
+#define Sec_To_Degree	 0.000277777778
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -40,11 +48,17 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+I2C_HandleTypeDef hi2c1;
+
 UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
 DMA_HandleTypeDef hdma_usart1_rx;
 
 /* USER CODE BEGIN PV */
+
+int Flag=0;
+Neo6M_GpsData NEO_GPS;
+uint8_t displayMode = 0;
 
 /* USER CODE END PV */
 
@@ -54,12 +68,32 @@ static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_USART2_UART_Init(void);
+static void MX_I2C1_Init(void);
 /* USER CODE BEGIN PFP */
+void Get_GpsData(Neo6M_GpsData* GpsData);
+static void NEO_GPS_Location(Neo6M_GpsData* GpsData);
+void Display_GPS_Data_On_OLED(Neo6M_GpsData* GpsData);
+void Display_PlusCode_On_OLED(Neo6M_GpsData* GpsData);
+void LatLongToPlusCode(double lat, double lon, char* plusCode, size_t size);
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+  if(GPIO_Pin == USER_BUTTON_Pin) {
+    // Chuyển đổi chế độ hiển thị
+    displayMode = (displayMode + 1) % 2;
+
+    // Hiển thị ngay trên OLED
+    if(displayMode == 0) {
+      Display_GPS_Data_On_OLED(&NEO_GPS);
+    } else {
+      Display_PlusCode_On_OLED(&NEO_GPS);
+    }
+  }
+}
 
 /* USER CODE END 0 */
 
@@ -95,8 +129,18 @@ int main(void)
   MX_DMA_Init();
   MX_USART1_UART_Init();
   MX_USART2_UART_Init();
+  MX_I2C1_Init();
   /* USER CODE BEGIN 2 */
-
+	NEO_GPS.UartPort=huart1;
+	// Khởi tạo OLED
+	  SSD1306_Init();
+	  SSD1306_Clear();
+	  SSD1306_GotoXY(0, 20);
+	  SSD1306_Puts("GPS TRACKER", &Font_11x18, SSD1306_COLOR_WHITE);
+	  SSD1306_GotoXY(0, 40);
+	  SSD1306_Puts("Initializing...", &Font_7x10, SSD1306_COLOR_WHITE);
+	  SSD1306_UpdateScreen();
+	  HAL_Delay(2000);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -106,7 +150,34 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-  }
+	     // Nhận dữ liệu GPS
+	     Get_GpsData(&NEO_GPS);
+
+	     // Nếu dữ liệu GPS hợp lệ, tính toán Plus Code và hiển thị trên OLED
+	     if(NEO_GPS.latitude != 0.0 && NEO_GPS.longitude != 0.0) {
+	       // Tính toán Plus Code
+	       LatLongToPlusCode(NEO_GPS.latitude, NEO_GPS.longitude, NEO_GPS.plusCode, sizeof(NEO_GPS.plusCode));
+
+	       // Hiển thị dữ liệu theo chế độ hiện tại
+	       if(displayMode == 0) {
+	         Display_GPS_Data_On_OLED(&NEO_GPS);
+	       } else {
+	         Display_PlusCode_On_OLED(&NEO_GPS);
+	       }
+
+	       // Gửi thông tin GPS qua UART2 (terminal)
+	       char uart_buffer[200];
+	       snprintf(uart_buffer, sizeof(uart_buffer),
+	                "GPS: %.6f,%6f | Plus Code: %s | URL: https://goo.gl/maps/%d%d\r\n",
+	                NEO_GPS.latitude, NEO_GPS.longitude, NEO_GPS.plusCode,
+	                (int)(fabs(NEO_GPS.latitude) * 1000000) % 1000000,
+	                (int)(fabs(NEO_GPS.longitude) * 1000000) % 1000000);
+	       HAL_UART_Transmit(&huart2, (uint8_t*)uart_buffer, strlen(uart_buffer), HAL_MAX_DELAY);
+	     }
+
+	     // Thêm thời gian trễ để tránh cập nhật quá nhanh
+	     HAL_Delay(1000);
+	}
   /* USER CODE END 3 */
 }
 
@@ -157,6 +228,40 @@ void SystemClock_Config(void)
 }
 
 /**
+  * @brief I2C1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_I2C1_Init(void)
+{
+
+  /* USER CODE BEGIN I2C1_Init 0 */
+
+  /* USER CODE END I2C1_Init 0 */
+
+  /* USER CODE BEGIN I2C1_Init 1 */
+
+  /* USER CODE END I2C1_Init 1 */
+  hi2c1.Instance = I2C1;
+  hi2c1.Init.ClockSpeed = 400000;
+  hi2c1.Init.DutyCycle = I2C_DUTYCYCLE_2;
+  hi2c1.Init.OwnAddress1 = 0;
+  hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
+  hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+  hi2c1.Init.OwnAddress2 = 0;
+  hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
+  hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
+  if (HAL_I2C_Init(&hi2c1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN I2C1_Init 2 */
+
+  /* USER CODE END I2C1_Init 2 */
+
+}
+
+/**
   * @brief USART1 Initialization Function
   * @param None
   * @retval None
@@ -184,7 +289,7 @@ static void MX_USART1_UART_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN USART1_Init 2 */
-
+		__HAL_UART_ENABLE_IT(&huart1,UART_IT_RXNE);
   /* USER CODE END USART1_Init 2 */
 
 }
@@ -245,19 +350,93 @@ static void MX_DMA_Init(void)
   */
 static void MX_GPIO_Init(void)
 {
-/* USER CODE BEGIN MX_GPIO_Init_1 */
-/* USER CODE END MX_GPIO_Init_1 */
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+  /* USER CODE BEGIN MX_GPIO_Init_1 */
+
+  /* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOH_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
 
-/* USER CODE BEGIN MX_GPIO_Init_2 */
-/* USER CODE END MX_GPIO_Init_2 */
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(Led_GPIO_Port, Led_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin : USER_BUTTON_Pin */
+  GPIO_InitStruct.Pin = USER_BUTTON_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(USER_BUTTON_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : Led_Pin */
+  GPIO_InitStruct.Pin = Led_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(Led_GPIO_Port, &GPIO_InitStruct);
+
+  /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI15_10_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
+
+  /* USER CODE BEGIN MX_GPIO_Init_2 */
+
+  /* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
+void Get_GpsData(Neo6M_GpsData* GpsData)
+{
+    char *P;
+    int n;
+    if (Flag == 1)
+    {
+        HAL_UART_Receive(&GpsData->UartPort, (uint8_t*)GpsData->Data, 700, HAL_MAX_DELAY);
+        P = strstr(GpsData->Data, "GPRMC");
+        if (*P == 'G')
+        {
+            n = 0;
+            while (*(P + n) != '\n') {
+                GpsData->location[n] = *(P + n);
+                n++;
+            }
+
+            sprintf(GpsData->buffer, "%s\r\n\n", GpsData->location);
+            sscanf(GpsData->buffer, "GPRMC,%lf,A,%lf,%c,%lf,%c,%lf,,%lf,,,A*64",
+                   &GpsData->time, &GpsData->latitude, &GpsData->N_OR_S,
+                   &GpsData->longitude, &GpsData->E_OR_W, &GpsData->Knots, &GpsData->Date);
+
+            NEO_GPS_Location(GpsData);
+
+            // ➕ In ra link Google Maps
+            char map_link[128];
+            snprintf(map_link, sizeof(map_link), "https://www.google.com/maps?q=%.6f,%.6f\r\n",
+                     GpsData->latitude, GpsData->longitude);
+            HAL_UART_Transmit(&huart2, (uint8_t*)map_link, strlen(map_link), HAL_MAX_DELAY);
+        }
+
+        __HAL_UART_ENABLE_IT(&GpsData->UartPort, UART_IT_RXNE);
+        Flag = 0;
+    }
+}
+
+
+static void NEO_GPS_Location(Neo6M_GpsData* GpsData)
+{
+    // Longitude
+    int lon_deg = (int)(GpsData->longitude / 100);
+    double lon_min = GpsData->longitude - (lon_deg * 100);
+    GpsData->longitude = lon_deg + lon_min / 60.0;
+    if (GpsData->E_OR_W == 'W') GpsData->longitude *= -1;
+
+    // Latitude
+    int lat_deg = (int)(GpsData->latitude / 100);
+    double lat_min = GpsData->latitude - (lat_deg * 100);
+    GpsData->latitude = lat_deg + lat_min / 60.0;
+    if (GpsData->N_OR_S == 'S') GpsData->latitude *= -1;
+}
 
 /* USER CODE END 4 */
 
